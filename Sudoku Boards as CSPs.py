@@ -26,24 +26,27 @@ def init_domains(board):
                 domains[(r, c)] = {board[r][c]}
     return domains
 
-# Get neighbors (row, col, box)
-def get_neighbors(var):
-    r, c = var
-    neighbors = set()
+# PRECOMPUTE NEIGHBORS FOR SPEED
+VARIABLES = [(r, c) for r in range(9) for c in range(9)]
+NEIGHBORS = {}
 
+for r, c in VARIABLES:
+    neighbors = set()
     # Row + Column
     for i in range(9):
         neighbors.add((r, i))
         neighbors.add((i, c))
-
     # Box
     br, bc = 3 * (r // 3), 3 * (c // 3)
     for i in range(br, br + 3):
         for j in range(bc, bc + 3):
             neighbors.add((i, j))
+    neighbors.remove((r, c))
+    NEIGHBORS[(r, c)] = neighbors
 
-    neighbors.remove(var)
-    return neighbors
+def get_neighbors(var):
+    # Now it just does an instant dictionary lookup
+    return NEIGHBORS[var]
 
 # AC-3 Algorithm
 def ac3(domains):
@@ -65,19 +68,24 @@ def ac3(domains):
 
 def revise(domains, xi, xj):
     revised = False
-    
-    if len(domains[xj]) == 1:
-        val = next(iter(domains[xj]))
-        if val in domains[xi]:
-            domains[xi].remove(val)
+    # For every x in xi's domain, is there a y in xj's domain such that x != y?
+    for x in list(domains[xi]):
+        # If the only possible value in xj is x, then x is impossible for xi
+        if len(domains[xj]) == 1 and x in domains[xj]:
+            domains[xi].remove(x)
             revised = True
-
     return revised
 
 # Select unassigned variable (MRV)
 def select_unassigned_variable(domains):
     unassigned = [v for v in domains if len(domains[v]) > 1]
-    return min(unassigned, key=lambda var: len(domains[var]))
+
+    # Sort primarily by Minimum Remaining Values (MRV)
+    # Sort secondarily by the Degree Heuristic (most constraints on unassigned neighbors)
+    return min(unassigned, key=lambda var: (
+        len(domains[var]),
+        -sum(1 for n in get_neighbors(var) if len(domains[n]) > 1)
+    ))
 
 # Check consistency
 def is_consistent(var, value, assignment):
@@ -86,40 +94,54 @@ def is_consistent(var, value, assignment):
             return False
     return True
 
-# Forward Checking
+
 def forward_check(domains, var, value):
-    new_domains = copy.deepcopy(domains)
+    # FAST COPY
+    new_domains = {k: set(v) for k, v in domains.items()}
     new_domains[var] = {value}
 
-    for neighbor in get_neighbors(var):
-        if value in new_domains[neighbor]:
-            new_domains[neighbor].remove(value)
-            if len(new_domains[neighbor]) == 0:
-                return None
+    # Queue holds variables that have been assigned a single value
+    # and need to propagate their constraints immediately.
+    queue = deque([var])
+
+    while queue:
+        current = queue.popleft()
+        # Since 'current' is in the queue, its domain size is exactly 1
+        val = list(new_domains[current])[0]
+
+        for neighbor in get_neighbors(current):
+            if val in new_domains[neighbor]:
+                new_domains[neighbor].remove(val)
+
+                # If a neighbor's domain becomes empty, this path is a dead end
+                if len(new_domains[neighbor]) == 0:
+                    return None
+
+                # CRITICAL FIX: If a neighbor was just reduced to a single value,
+                # cascade the forced assignment immediately!
+                if len(new_domains[neighbor]) == 1:
+                    queue.append(neighbor)
 
     return new_domains
 
-# Backtracking Search
 def backtrack(domains):
     global backtrack_calls, backtrack_failures
     backtrack_calls += 1
 
-    # Check if solved
+    # Solved state: all variables have exactly one value
     if all(len(domains[v]) == 1 for v in domains):
         return domains
 
+    # Minimum Remaining Values (MRV) heuristic
     var = select_unassigned_variable(domains)
 
     for value in domains[var]:
-        if is_consistent(var, value, {v: list(domains[v])[0] for v in domains if len(domains[v]) == 1}):
+        new_domains = forward_check(domains, var, value)
 
-            new_domains = forward_check(domains, var, value)
-            if new_domains is not None:
-
-                if ac3(new_domains):
-                    result = backtrack(new_domains)
-                    if result is not None:
-                        return result
+        if new_domains is not None:
+            result = backtrack(new_domains)
+            if result is not None:
+                return result
 
     backtrack_failures += 1
     return None
@@ -132,11 +154,11 @@ def solve_sudoku(board):
 
     domains = init_domains(board)
 
+    # Run AC-3 ONCE at the start to narrow down the initial search space
     if not ac3(domains):
-        return None, backtrack_calls, backtrack_failures
+        return None, 0, 0
 
     result = backtrack(domains)
-
     return result, backtrack_calls, backtrack_failures
 
 # Print Board
